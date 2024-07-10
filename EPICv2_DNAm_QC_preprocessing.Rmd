@@ -1,0 +1,388 @@
+---
+title: "Infinium MethylationEPIC v2.0 BeadChip (EPICv2) QC and preprocessing"
+date: "2024 Jul 10"
+author: "Beryl Zhuang and Marcia Jude et al. "
+output:
+  rmdformats::robobook:
+    highlight: kate
+    number_sections: true
+
+---
+
+# Introduction
+
+This document comprises of the steps involved in quality check (QC), normalization and preprocessing of DNA methylation data obtained from the EPICv2 array.
+
+Please cite: 
+Zhuang BC, Jude MS, Konwar C, Ryan CP, Whitehead J, Engelbrecht H-R, et al. Comparison of Infinium MethylationEPIC v2.0 to v1.0 for human population epigenetics: considerations for addressing EPIC version differences in DNA methylation-based tools [Internet]. bioRxiv; 2024 p. 2024.07.02.600461. Available from: https://www.biorxiv.org/content/10.1101/2024.07.02.600461v1  
+
+Additional QC steps for both EPICv2 and EPICv1 were performed as described in 
+Konwar C, Asiimwe R, Inkster AM, Merrill SM, Negri GL, Aristizabal MJ, et al. Risk-focused differences in molecular processes implicated in SARS-CoV-2 infection: corollaries in DNA methylation and gene expression. Epigenetics Chromatin. 2021;14:54.(https://github.com/kobor-lab/Public-Scripts/blob/master/COVID-19/DNAme%20preprocessing.Rmd)  
+
+
+The IlluminaHumanMethylationEPICv2manifest package (https://jokergoo.github.io/IlluminaHumanMethylationEPICv2manifest/articles/IlluminaHumanMethylationEPICv2manifest.html) provides manifest for EPICv2, based on the annotation files from Illumina (https://support.illumina.com/array/array_kits/infinium-methylationepic-beadchip-kit/downloads.html)
+
+
+# List of QC and preprocessing steps
+A. create extended EPICv2 RGset  
+B. QC:
+    1. Control metrics (ewastools)
+    2. Methylated/unmethylated intensity check (minfi)
+    3. Sex prediction (ewastools)
+C. Preprocessing
+    1. create noob object (minfi)
+    2. noob and functional normalization (minfi)
+D. Collapse replicate probes by detection p-value/mean/median
+
+# Load R Libraries
+```{r Load libraries, message=FALSE, warning=FALSE}
+library(minfi)
+library(ewastools)
+library(dplyr)
+library(IlluminaHumanMethylationEPICv2manifest) # EPIC v2
+library(IlluminaHumanMethylationEPICv2anno.20a1.hg38) # EPIC v2
+```
+
+
+# Read IDAT files and create extended RGset
+
+create EPICv2 extended RGset 
+
+```{r}
+#https://jokergoo.github.io/IlluminaHumanMethylationEPICv2manifest/articles/IlluminaHumanMethylationEPICv2manifest.html
+library(IlluminaHumanMethylationEPICv2manifest) # EPIC v2
+library(IlluminaHumanMethylationEPICv2anno.20a1.hg38) # EPIC v2
+
+
+path <- "your_IDAT_Path" # must contain a sample sheet
+targets <- read.metharray.sheet(path) ##tells R to look for sample sheet within the path
+
+
+baseDir <- system.file(path, package = "minfiData")
+
+# create RGset
+RGset <- read.metharray.exp(targets = targets, verbose = TRUE, extended = TRUE)
+
+
+# note: update annotation for EPIC V2 
+RGset@annotation <- c(array = "IlluminaHumanMethylationEPICv2", annotation = "20a1.hg38")
+
+#test
+betas <- getBeta(RGset)
+dim(betas)
+betas[1:5, 1:5]
+```
+
+
+# QC
+
+## Control metrics (ewastools)
+The ewastools package (version 1.7.2) aims "to facilitate quality control and statistical analysis of datasets generated from the Illumina Infinium BeadChip platforms" https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5984806/
+
+The control_metrics function uses the Illumina’s 636 control probes to assess 17 technical parameters including array staining, extension, hybridization, target removal, specificity, and bisulfite conversion, and compares to the thresholds recommended by Illumina.
+
+```{r}
+library(ewastools)
+ewas_meth <- read_idats(SampleInfo$Basename)
+
+ctrls <- control_metrics(ewas_meth)
+
+# A logical vector of passed/failed is returned by sample_failure() which compares all 17 metrics against the thresholds recommended by Illumina.
+sample_failure(ctrls)
+```
+
+
+
+
+## methylated/unmethylated intensity check (minfi)
+Uses the log median intensity in both the methylated (M) and unmethylated (U) channels  
+
+```{r}
+mset_raw <- preprocessRaw(RGset) #Make sure it is the extended RG Set
+qc <- getQC(mset_raw)
+
+badSampleCutoff <- 10.5 #default value
+meds <- (qc$mMed + qc$uMed)/2
+whichBad <- which((meds < badSampleCutoff)) #which sample with meds lower than the avg of mMed and uMed
+controlqc_minfi <- plotQC(qc, badSampleCutoff = badSampleCutoff)
+
+```
+
+
+## Sex prediction (ewastools)
+
+ewastools functions check_sex(). check_sex() computes the normalized average total fluorescence intensities of the probes targeting the X and Y chromosome. predict_sex() uses the output of check_sex() and recorded sex in order to identify mislabelled samples. This function is modified (check_sexV2) for EPICv2 data.
+
+``` {r Sex_ewastools}
+# update for EPIC v2, modified from the check_sex() function
+check_sexV2 <- function (raw) 
+{
+    if (!all(c("M", "U", "manifest") %in% names(raw))) 
+        stop("Invalid argument")
+    with(raw, {
+        chrX = manifest[chr == "chrX", index] ## manifest chr name updated
+        chrY = manifest[chr == "chrY", index]## manifest chr name updated
+        auto = manifest[!chr %in% c("chrX", "chrY"), index]
+        chrX = M[chrX, , drop = FALSE] + U[chrX, , drop = FALSE]
+        chrY = M[chrY, , drop = FALSE] + U[chrY, , drop = FALSE]
+        auto = M[auto, , drop = FALSE] + U[auto, , drop = FALSE]
+        chrX = colMeans(chrX, na.rm = TRUE)
+        chrY = colMeans(chrY, na.rm = TRUE)
+        auto = colMeans(auto, na.rm = TRUE)
+        chrX = chrX/auto
+        chrY = chrY/auto
+        return(list(X = chrX, Y = chrY))
+    })
+}
+
+
+predicted_sex <- check_sexV2(ewas_meth)
+ewastools_predicted_sex <- predict_sex(predicted_sex$X,predicted_sex$Y,male = male_index,female = female_index)
+
+```
+
+
+
+# Preprocessing
+
+## create noob object (minfi)
+Reference: Triche TJ, Weisenberger DJ, Van Den Berg D, Laird PW, Siegmund KD. Low-level processing of Illumina Infinium DNA Methylation BeadArrays. Nucleic Acids Res. 2013;41:e90.
+
+```{r noob}
+noob <- preprocessNoob(RGset)
+```
+
+## noob and functional normalization (minfi)
+Reference: Fortin J-P, Labbe A, Lemire M, Zanke BW, Hudson TJ, Fertig EJ, et al. Functional normalization of 450k methylation array data improves replication in large cancer studies. Genome Biol. 2014;15:503. 
+```{r preprocessFunnorm}
+nPC=2 #default
+MSet.fnorm <- preprocessFunnorm(RGset, nPCs = nPC, sex = NULL, bgCorr = TRUE, dyeCorr = TRUE, verbose = TRUE)
+
+```
+
+
+# Collapse replicate probes by detection p-value/mean/median
+There are 5225 probes on EPICv2 that have two or more replicates (replicate probes, total 11622). To make EPICv2 probes compatible with EPICv1 and 450K, and to use as inputs for DNA methylation-based tools developed from the previous array platform and versions, the replicate probes in EPICv2 are collapsed as a single value by different strategies, and suffices of the probe names are removed (e.g. cg25324105_BC11 -> cg25324105; cg00002033_TC11 and cg00002033_TC12 collapsed-> cg00002033)
+
+See supplementary material from Zhuang and Jude et al. 2024 for Characterization of replicate probes in EPICv2 and comparing strategies for collapsing EPICv2 replicate probes
+https://doi.org/10.1101/2024.07.02.600461 
+
+Here, we provide the scripts to create EPICv2 beta value matrix with replicate probes collapsed by one of the three strategies: 
+
+i. choosing the replicate with lowest detection p-value as the representative beta value[1]
+
+ii. using mean of all replicates mapping to a genomic locus
+
+iii. using median of all replicates mapping to a genomic locus
+
+Reference: 1.Kaur, D. et al. Comprehensive evaluation of the Infinium human MethylationEPIC v2 BeadChip. Epigenetics Commun. 3, 6 (2023).
+
+## choosing the replicate with lowest detection p-value as the representative beta value
+EPICv2 replicate probes with lowest detection p-value were chosen as the representative probe.
+
+```{r}
+unique_probes <- readRDS("EPIC_v2_unique_probes.rds")
+dup_probes <- readRDS("EPIC_v2_dup_probes.rds")
+
+# calculate detection P----
+detp <- minfi::detectionP(RGset)
+rep_probes <- intersect(rownames(detp), dup_probes$TargetID) %>% sort()
+length(rep_probes)
+replicate_probes_detP <- detp[rep_probes, ]
+
+
+# matrix with unique probes----
+input_beta_all <- getBeta(MSet.fnorm)
+
+input_beta <- input_beta_all
+select_probes <- intersect(rownames(input_beta), unique_probes$TargetID)
+length(select_probes) 
+unique_probes <- unique_probes[select_probes, ]
+
+input_beta <- input_beta[select_probes, ]
+dim(input_beta)
+rownames(input_beta) <-unique_probes$NAME  # update probe name
+input_beta[1:5,]
+
+input_beta_unique <- input_beta
+
+
+# collapse replicate probes by detP----
+betas <- input_beta_all
+dup_probes <- dup_probes %>% filter(TargetID %in% rownames(betas))
+replicate_probes_detP <- replicate_probes_detP[intersect(rownames(betas), rownames(replicate_probes_detP)),]
+
+betas_dup <- betas[rownames(replicate_probes_detP),]
+
+x_detp <- replicate_probes_detP%>% as.data.frame()
+x_detp$TargetID <- rownames(x_detp)
+x_detp <- left_join(x_detp, dup_probes)
+
+
+
+# for each sample, choose the probe with lowest detp
+# mean or median method recommended if the sample size is large (e.g. n > 200)
+x_detp_matrix <- NULL
+x_probe_select <- NULL
+for (i in 1:ncol(replicate_probes_detP)){
+    print(i)
+    x_tmp <- x_detp[,c(i, ncol(x_detp)-1,ncol(x_detp))]
+    colnames(x_tmp)[1] <- "pval"
+    x_tmp <- cbind(x_tmp, data.frame(beta = betas_dup[, colnames(x_detp)[i]]))
+    
+    
+    tmp <- slice_min(group_by(x_tmp, NAME), pval, n = 1, with_ties = FALSE)
+    tmp <- as.data.frame(tmp)
+    #output the probes selected and detP
+    probe_select <- tmp %>% select(NAME, TargetID,pval)
+    colnames(probe_select)[2:3] <- c(colnames(x_detp)[i], paste0(colnames(x_detp)[i], "_detP"))
+    if(i ==1){
+        x_probe_select <- probe_select
+    }else{
+        x_probe_select <- left_join(x_probe_select,probe_select)
+    }
+    
+    
+    y <- tmp[, 4] %>% as.matrix()
+    rownames(y) <- tmp$NAME
+    colnames(y) <- colnames(x_detp)[i]
+    x_detp_matrix <- cbind(x_detp_matrix, y)
+    
+}
+
+dim(x_detp_matrix)
+
+#output beta matrix(detP)----
+EPICv2_beta_matrix_by_detp <- rbind(input_beta_unique, x_detp_matrix)
+dim(EPICv2_beta_matrix_by_detp)
+
+# list of representative probe selected for the replicated probes----
+EPICv2_representitive_replicate_probes <- x_probe_select
+```
+
+
+## using mean/median of all replicates mapping to a genomic locus
+```{r}
+unique_probes <- readRDS("EPIC_v2_unique_probes.rds")
+dup_probes <- readRDS("EPIC_v2_dup_probes.rds")
+
+input_beta_all <- getBeta(MSet.fnorm)
+
+# matrix with unique probes----
+input_beta <- input_beta_all
+select_probes <- intersect(rownames(input_beta), unique_probes$TargetID)
+length(select_probes)
+unique_probes <- unique_probes[select_probes, ]
+input_beta <- input_beta[select_probes, ]
+dim(input_beta)
+rownames(input_beta) <-unique_probes$NAME  # update probe names
+input_beta[1:5,]
+input_beta_unique <- input_beta
+
+
+# collapse replicate probes by mean/median----
+input_beta <- input_beta_all
+dup_probes <- readRDS("EPIC_v2_dup_probes.rds")
+select_probes <- intersect(rownames(input_beta), dup_probes$TargetID)
+dup_probes <- dup_probes[select_probes, ]
+
+# create a mean beta matrix for dup probes
+betas <- input_beta[dup_probes$TargetID, ]
+beta_df <- betas%>% as.data.frame()
+beta_df$TargetID <- rownames(beta_df)
+beta_df <- left_join(beta_df, dup_probes)
+beta_df$TargetID <- NULL
+
+
+# collapse by mean for replicate probes----
+x_mean <- beta_df %>% group_by(NAME) %>% summarise(across(everything(), list(mean))) %>% as.data.frame()
+rownames(x_mean) <- x_mean$NAME
+x_mean$NAME <- NULL
+colnames(x_mean) <- colnames(input_beta)
+
+# rbind with single probes
+rownames(input_beta_unique)[1:5]
+
+x <- rbind(input_beta_unique, x_mean %>% as.matrix())
+dim(x)
+
+#output beta matrix (mean)----
+EPICv2_beta_matrix_by_mean <- x
+
+
+
+
+# collapse by median for replicate probes----
+x_median <- beta_df %>% group_by(NAME) %>% summarise(across(everything(), list(median))) %>% as.data.frame()
+rownames(x_median) <- x_median$NAME
+x_median$NAME <- NULL
+colnames(x_median) <- colnames(input_beta)
+
+median_matrix <- rbind(input_beta_unique, x_median %>% as.matrix())
+dim(median_matrix) 
+
+#output beta matrix (median)----
+EPICv2_beta_matrix_by_median <- median_matrix
+
+```
+
+
+# session info
+sessionInfo()
+R version 4.2.2 (2022-10-31)
+Platform: x86_64-pc-linux-gnu (64-bit)
+Running under: Ubuntu 22.04.2 LTS
+
+Matrix products: default
+BLAS:   /usr/lib/x86_64-linux-gnu/openblas-pthread/libblas.so.3
+LAPACK: /usr/lib/x86_64-linux-gnu/openblas-pthread/libopenblasp-r0.3.20.so
+
+locale:
+ [1] LC_CTYPE=en_US.UTF-8       LC_NUMERIC=C               LC_TIME=en_US.UTF-8        LC_COLLATE=en_US.UTF-8    
+ [5] LC_MONETARY=en_US.UTF-8    LC_MESSAGES=en_US.UTF-8    LC_PAPER=en_US.UTF-8       LC_NAME=C                 
+ [9] LC_ADDRESS=C               LC_TELEPHONE=C             LC_MEASUREMENT=en_US.UTF-8 LC_IDENTIFICATION=C       
+
+attached base packages:
+[1] parallel  stats4    stats     graphics  grDevices datasets  utils     methods   base     
+
+other attached packages:
+ [1] IlluminaHumanMethylationEPICv2anno.20a1.hg38_0.99.0 IlluminaHumanMethylationEPICv2manifest_0.99.1      
+ [3] dplyr_1.1.0                                         ewastools_1.7.2                                    
+ [5] minfi_1.44.0                                        bumphunter_1.40.0                                  
+ [7] locfit_1.5-9.7                                      iterators_1.0.14                                   
+ [9] foreach_1.5.2                                       Biostrings_2.66.0                                  
+[11] XVector_0.38.0                                      SummarizedExperiment_1.28.0                        
+[13] Biobase_2.58.0                                      MatrixGenerics_1.10.0                              
+[15] matrixStats_0.63.0                                  GenomicRanges_1.50.2                               
+[17] GenomeInfoDb_1.34.9                                 IRanges_2.32.0                                     
+[19] S4Vectors_0.36.2                                    BiocGenerics_0.44.0                                
+
+loaded via a namespace (and not attached):
+  [1] rjson_0.2.21              ellipsis_0.3.2            siggenes_1.72.0           mclust_6.0.0             
+  [5] base64_2.0.1              rstudioapi_0.14           bit64_4.0.5               AnnotationDbi_1.60.2     
+  [9] fansi_1.0.4               xml2_1.3.3                codetools_0.2-19          splines_4.2.2            
+ [13] sparseMatrixStats_1.10.0  cachem_1.0.7              scrime_1.3.5              knitr_1.42               
+ [17] Rsamtools_2.14.0          annotate_1.76.0           dbplyr_2.3.1              png_0.1-8                
+ [21] HDF5Array_1.26.0          readr_2.1.4               BiocManager_1.30.20       compiler_4.2.2           
+ [25] httr_1.4.5                Matrix_1.5-3              fastmap_1.1.1             limma_3.54.2             
+ [29] cli_3.6.0                 htmltools_0.5.4           prettyunits_1.1.1         tools_4.2.2              
+ [33] glue_1.6.2                GenomeInfoDbData_1.2.9    rappdirs_0.3.3            doRNG_1.8.6              
+ [37] Rcpp_1.0.10               vctrs_0.5.2               rhdf5filters_1.10.1       multtest_2.54.0          
+ [41] preprocessCore_1.60.2     nlme_3.1-162              rtracklayer_1.58.0        DelayedMatrixStats_1.20.0
+ [45] xfun_0.37                 stringr_1.5.0             lifecycle_1.0.3           restfulr_0.0.15          
+ [49] renv_0.17.0               rngtools_1.5.2            XML_3.99-0.13             beanplot_1.3.1           
+ [53] zlibbioc_1.44.0           MASS_7.3-58.3             hms_1.1.2                 rhdf5_2.42.1             
+ [57] GEOquery_2.66.0           RColorBrewer_1.1-3        yaml_2.3.7                curl_5.0.0               
+ [61] memoise_2.0.1             biomaRt_2.54.1            reshape_0.8.9             stringi_1.7.12           
+ [65] RSQLite_2.3.0             genefilter_1.80.3         BiocIO_1.8.0              GenomicFeatures_1.50.4   
+ [69] filelock_1.0.2            BiocParallel_1.32.6       rlang_1.1.1               pkgconfig_2.0.3          
+ [73] bitops_1.0-7              nor1mix_1.3-0             evaluate_0.20             lattice_0.20-45          
+ [77] purrr_1.0.1               Rhdf5lib_1.20.0           GenomicAlignments_1.34.1  bit_4.0.5                
+ [81] tidyselect_1.2.0          plyr_1.8.8                magrittr_2.0.3            R6_2.5.1                 
+ [85] generics_0.1.3            DelayedArray_0.24.0       DBI_1.1.3                 withr_2.5.0              
+ [89] pillar_1.8.1              survival_3.5-5            KEGGREST_1.38.0           RCurl_1.98-1.10          
+ [93] tibble_3.2.0              crayon_1.5.2              utf8_1.2.3                BiocFileCache_2.6.1      
+ [97] rmarkdown_2.20            tzdb_0.3.0                progress_1.2.2            grid_4.2.2               
+[101] data.table_1.14.8         blob_1.2.3                digest_0.6.31             xtable_1.8-4             
+[105] tidyr_1.3.0               illuminaio_0.40.0         openssl_2.0.6             askpass_1.1              
+[109] quadprog_1.5-8   
