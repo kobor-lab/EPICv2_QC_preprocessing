@@ -155,11 +155,10 @@ noob <- preprocessNoob(RGset)
 ## noob and functional normalization (minfi)
 Reference: Fortin J-P, Labbe A, Lemire M, Zanke BW, Hudson TJ, Fertig EJ, et al. Functional normalization of 450k methylation array data improves replication in large cancer studies. Genome Biol. 2014;15:503. 
 ```{r preprocessFunnorm}
-nPC=2 #default
+nPC=2 #default or choose the top PCs that accounted for 90% or more of the variance.
 MSet.fnorm <- preprocessFunnorm(RGset, nPCs = nPC, sex = NULL, bgCorr = TRUE, dyeCorr = TRUE, verbose = TRUE)
 
 ```
-
 
 # Collapse replicate probes by detection p-value/mean/median
 There are 5225 probes on EPICv2 that have two or more replicates (replicate probes, total 11622). To make EPICv2 probes compatible with EPICv1 and 450K, and to use as inputs for DNA methylation-based tools developed from the previous array platform and versions, the replicate probes in EPICv2 are collapsed as a single value by different strategies, and suffices of the probe names are removed (e.g. cg25324105_BC11 -> cg25324105; cg00002033_TC11 and cg00002033_TC12 collapsed-> cg00002033)
